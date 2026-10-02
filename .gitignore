@@ -1,0 +1,9 @@
+/venv
+
+/logs
+
+/e2e-reports
+
+/__pycache__
+
+/.pytest_cache

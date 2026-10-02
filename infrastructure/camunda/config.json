@@ -1,0 +1,201 @@
+{
+  "_comment": "KONFIGURASI DINAMIS WEBHOOK → CAMUNDA. Hanya berisi hal yang memang berubah-ubah: target proses + pemetaan variabel. Tidak ada filter marketplace/signal code, TAPI ada GATE STATUS ORDER (kunci order_status di bawah) — hanya webhook dengan status order tertentu yang men-start proses. File ini dibaca ulang otomatis setiap webhook masuk (edit → langsung berlaku, tanpa restart). Panduan singkat: (1) 'process_definition_key' boleh 1 string ATAU array (satu instance per key); (2) 'business_key' boleh memakai {{var.namaVariabel}} hasil mapping, mis. invoice:courier:retur_date; (3) tiap variabel boleh: string path ('data.ordersn'), template ('{{marketplace}}'), objek {path/literal/template/default}, atau ARRAY = rantai fallback dibaca kiri→kanan sampai ada nilainya — ini yang membuatnya jalan di semua marketplace; (4) untuk mengirim ARRAY sebagai NILAI variabel, bungkus: {\"literal\": [\"a\",\"b\"]}; (5) 'variable_types' opsional untuk memaksa tipe Camunda 7 (boleh lowercase 'string'/'long'/'json'); (6) variabel yang tidak ketemu otomatis dilewati, dan business key tetap terbentuk walau satu bagian kosong; (7) path berawalan 'order.' diambil dari DETAIL ORDER APISIX (bukan payload webhook) — lihat bagian orderItems/orderProducts/total_reserved di bawah.",
+  "id": "retur-from-order-status",
+  "enabled": true,
+  "_comment_order_status": "GATE STATUS ORDER (hot-reload: edit file ini → langsung berlaku, tanpa restart). Isi = daftar status yang BOLEH men-start proses — SEKARANG HANYA UNPAID: instance dibuat sekali saat order masih UNPAID, lalu MENUNGGU di signal catch event dalam subprocess. Status lain TIDAK start instance baru; untuk status itu webhook hanya MENGIRIM SIGNAL (bagian `signal`, send_on_webhook=true) ke instance yang sudah berjalan: ON_HOLD & READY_TO_SHIP → readyToShip${invoice}, AWAITING_SHIPMENT → awaitingCollection${invoice}, CANCELLED → cancel${invoice}. PENTING: gate ini dievaluasi SETELAH auto-signal, jadi status di luar daftar TETAP mengirim signal (hanya start event-nya yang ditolak). Status dibaca dari payload MENTAH: Shopee data.status, TikTok data.order_status. Gate global .env WEBHOOK_ORDER_STATUS_ALLOWLIST (butuh restart) menyaring SEBELUM auto-signal — biarkan KOSONG, karena kalau diisi sinyal status di luar daftar ikut terblokir.",
+  "order_status": [
+    "UNPAID"
+  ],
+  "process_definition_key": "serviceWebhook",
+  "business_key": "{{var.invoice}}:{{var.courier}}:{{var.retur_date}}",
+  "variables": {
+    "invoice": [
+      "data.tracking_number",
+      "data.tracking_no",
+      "data.invoice",
+      "data.ordersn",
+      "data.order_id"
+    ],
+    "courier": [
+      "data.shipping_carrier",
+      "data.courier",
+      "data.logistics_channel",
+      "data.shipping_provider",
+      "data.shipping_provider_id",
+      "data.channel",
+      { "literal": "" }
+    ],
+    "retur_date": [
+      "data.retur_date",
+      "data.return_time",
+      "data.update_time",
+      "timestamp"
+    ],
+    "marketplace": "{{marketplace}}",
+    "orderId": [
+      "data.ordersn",
+      "data.order_id"
+    ],
+    "orderStatus": [
+      "data.status",
+      "data.order_status"
+    ],
+    "shopId": [
+      "shop_id",
+      { "literal": "" }
+    ],
+    "signalCode": "{{signal_code}}",
+    "e2eTest": { "path": "data.e2e_test", "default": false },
+    "updateTime": [
+      "data.update_time",
+      "timestamp",
+      { "literal": "" }
+    ],
+
+    "_comment_order": "── DETAIL ORDER dari APISIX (GET /order?ids=<order id>) ── Semua path 'order.*' diambil dari hasil fetch detail order, bukan dari payload webhook. orderItems = array line item [{product_id, product_name, variant_name, seller_sku, quantity, unit_price}] dan ditulis sebagai TIPE json — backend otomatis meng-serialize jadi teks JSON karena Camunda 7 menolak nilai array/objek untuk tipe Json (HTTP 400: Must provide 'null' or String value ...). orderProducts = ringkasan teks 'Kaos Polos (M) x2, Celana x1'. Bila fetch APISIX gagal / order tidak ketemu, variabel ini otomatis dilewati (start event tetap jalan).",
+    "orderItems": { "path": "order.items" },
+    "orderProducts": [
+      { "path": "order.products_summary" },
+      { "literal": "" }
+    ],
+    "orderItemCount": { "path": "order.item_count" },
+    "orderTotalQuantity": { "path": "order.total_quantity" },
+    "orderDetailStatus": [
+      { "path": "order.order_status" },
+      { "literal": "" }
+    ],
+    "orderDetailOk": { "path": "order.ok" },
+
+    "_comment_reserved": "── TOTAL RESERVED STOCK per produk (APISIX /order?product_id=…) ── Diambil SETELAH detail order: satu panggilan per produk yang ada di order, memakai filter gateway product_id (status order tetap default /order). total_reserved = jumlah semua produk di order itu. reserved_products = map NESTED per produk { \"<product_id>\": { \"total_reserved\": <jumlah>, \"variants\": { \"<variant_id>\": { \"variant_id\", \"seller_sku\", \"total_reserved_stock\", \"variant_name\" } } } } — rincian PER VARIANT supaya produk multi-variant TIDAK tampil sebagai satu angka saja. variant_name diambil dari DB backend (marketplace_variant.variant_name); bila DB gagal, hanya nama yang kosong (variant_id/seller_sku/jumlah tetap terkirim). Bila fetch gagal / gateway belum di-reload, kedua variabel ini otomatis dilewati (start event tetap jalan).",
+    "total_reserved": { "path": "order.total_reserved" },
+    "reserved_products": { "path": "order.reserved_by_product" },
+
+    "_comment_part": "── PART ID dari sku_mapping (dibaca backend SETELAH reserved stock, dari product_id line item: product_id → marketplace_product → marketplace_variant → sku_mapping ACTIVE → inventree_part_id) ── order.part_id = ARRAY SEMUA part InvenTree pada order ini (satu product marketplace bisa memetakan ke BANYAK part_id) → variabel `partId`. CATATAN TIPE: `partId` memakai TIPE STRING berisi TEKS JSON ARRAY (mis. \"[3000100, 3000101]\"), BUKAN tipe Json. Alasan: tipe Json Camunda (plugin Spin) TIDAK bisa di-ROUND-TRIP lewat fetchAndLock external task — nilainya kembali sebagai objek deskriptor (nodeType/dataFormatName) sehingga isi array HILANG dan service task kena PART_ID_MISSING. Dengan String, nilainya utuh sebagai teks JSON array dan handler (camunda/task_handlers.py::_extract_part_ids) meng-parse-nya kembali jadi DAFTAR part_id → SEMUA part_id dikirim ke /run-part (boleh diulang) untuk dijalankan pipeline dari awal (GET product / SYNC / MAPPING semua marketplace → inventory_report / stock_sync_queue / stock_sync_log). Produk tidak punya mapping ACTIVE / DB gagal → kunci tidak ditulis → variabel dilewati (start event tetap jalan, service task kena BPMN error PART_ID_MISSING).",
+    "partId": { "path": "order.part_id" }
+  },
+
+  "_comment_signal": "HIT SIGNAL (hot-reload: edit file ini → langsung berlaku, tanpa restart). `by_status` = peta STATUS ORDER → NAMA SINYAL yang dikirim ke Camunda (tangkap dengan Signal Catch Event / Intermediate Signal Throw di BPMN). Dipakai oleh: (a) endpoint manual POST /api/v1/webhook/camunda/signal?status=ON_HOLD, (b) topic external service task `send-signal`, (c) OTOMATIS saat webhook masuk bila `send_on_webhook=true`. Presedensi: by_marketplace[<mp>][STATUS] → by_status[STATUS] → default_signal. `by_marketplace` boleh memakai kunci 'tiktok'/'shopee'/'all' (contoh: {\"tiktok\": {\"ON_HOLD\": \"retur-on-hold-tiktok\"}}), biarkan {} bila nama sinyal sama untuk semua marketplace. `variables` memakai sintaks yang sama dengan `variables` di atas (path/template/literal/array, namespace order.*). `default_signal` kosong = status yang tidak dipetakan TIDAK mengirim signal (tercatat skipped_reason: signal_not_configured). CATATAN Camunda 7: REST /signal tidak punya field businessKey → nilai `business_key` dikirim sebagai VARIABEL `businessKey`. NAMA SINYAL BOLEH DINAMIS: nilai by_status / by_marketplace / default_signal boleh memuat placeholder ${invoice} (gaya JS template literal) ATAU {{invoice}} — dua-duanya diisi dari VARIABEL signal (kunci `variables` di bagian ini, hasil mapping sudah di-resolve), bukan payload mentah. Contoh: {\"READY_TO_SHIP\": \"readyToShip${invoice}\"} dengan \"variables\": {\"invoice\": [\"data.ordersn\", \"data.order_id\"]} → nama yang dihitung/dikirim \"readyToShipSH-123\". Awalan var. boleh ditulis (${var.invoice} = ${invoice}). Variabel tidak ketemu → placeholder dibiarkan apa adanya + warning di log; hasil render KOSONG → sinyal tidak dikirim (skipped_reason: signal_not_configured). Lihat camunda/signals.py::render_signal_name.",
+  "signal": {
+    "enabled": true,
+    "send_on_webhook": true,
+    "by_status": {
+      "_comment": "Peta STATUS ORDER → signal BPMN. Nama HARUS sama dengan <signal name> di XML. Nama SENGaja DINAMIS (${invoice}) → tiap order punya nama UNIK, jadi pengiriman broadcast pun HANYA mengenai instance order itu. Kenapa bukan nama statis? BOUNDARY event di-subprocess memegang subscription pada scope execution TANPA activityId, sehingga Camunda MENOLAK POST /execution/{id}/signal (error: 'it has no current activity') — karenanya nama statis harus disebarkan ke SEMUA instance. `execution_lookup` di bawah dipakai untuk VERIFIKASI subscriber + pilih jalur per-execution bila memungkinkan. UNPAID sengaja TIDAK dipetakan: status itu hanya START proses, tidak mengirim signal.",
+      "ON_HOLD": "readyToShip${invoice}",
+      "READY_TO_SHIP": "readyToShip${invoice}",
+      "AWAITING_SHIPMENT": "readyToShip${invoice}",
+      "AWAITING_COLLECTION": "awaitingCollection${invoice}",
+      "PROCESSED": "awaitingCollection${invoice}",
+      "CANCELLED": "APIMPcancelInvoice${invoice}",
+      "CANCEL": "APIMPcancelInvoice${invoice}"
+    },
+    "by_marketplace": {
+      "_comment": "Override nama sinyal per marketplace (menimpa by_status). Contoh aktif: \"tiktok\": {\"ON_HOLD\": \"retur-on-hold-tiktok\"}",
+      "tiktok": {},
+      "shopee": {}
+    },
+    "default_signal": "",
+    "execution_id": null,
+    "business_key": "{{var.signalName}}:{{var.signalOrderStatus}}",
+    "execution_lookup": {
+      "_comment": "VERIFIKASI subscriber signal (Camunda 7). enabled=true → SEBELUM kirim, backend mencari execution yang menunggu signal ini pada process instance dengan business key cocok `business_key_template` (LIKE, '%' = wildcard). Hasilnya: (a) ketemu + execution layak → POST /execution/{id}/signal (per-execution); (b) ketemu tapi execution tidak layak (boundary event) → tetap broadcast — AMAN karena nama signal per-order; (c) TIDAK ketemu → silent-drop terdeteksi: `fallback` \"broadcast\" = kirim broadcast + WARNING; \"skip\" = jangan kirim (skipped_reason: signal_no_subscriber).",
+      "enabled": true,
+      "business_key_template": "{{var.invoice}}:%",
+      "fallback": "broadcast"
+    },
+    "status_fallback": {
+      "_comment": "STATUS EFEKTIF — status dari payload WEBHOOK selalu dipakai LEBIH DULU. Bila status itu TIDAK punya mapping di `by_status`/`by_marketplace` (mis. `UNPAID` yang memang sengaja tidak dipetakan karena hanya memicu START), maka status dari DETAIL ORDER APISIX (`order.order_status` → variabel `orderDetailStatus`) dipakai sebagai gantinya. Contoh nyata: webhook Shopee `data.status=UNPAID` tapi gateway sudah melaporkan `READY_TO_SHIP` → signal tetap `readyToShip${invoice}` (bukan dilewati dengan skipped_reason `signal_not_configured`). Hanya berlaku saat nama signal TIDAK dipaksa lewat argumen `signal_name` (mis. external task `send-signal` yang mengirim nama eksplisit). `skip_statuses` = status DETAIL yang TIDAK boleh dipakai sebagai fallback (mis. isi [\"CANCELLED\"] bila cancel hanya boleh berasal dari webhook). enabled=false → perilaku lama (status tak dipetakan = signal tidak dikirim).",
+      "enabled": true,
+      "skip_statuses": []
+    },
+    "variables": {
+      "_comment": "Variabel yang ikut dikirim bersama signal. `signalName`/`signalOrderStatus`/`signalMarketplace` selalu ditambahkan otomatis oleh backend. PENTING: daftar fallback `invoice` di bawah harus IDENTIK dengan `variables.invoice` di atas — kalau beda, nama signal hasil render bisa tidak sama dengan ekspresi ${invoice} di BPMN dan signal hilang tidak ketangkap.",
+      "orderId": [
+        "data.ordersn",
+        "data.order_id",
+        "data.ordersn_list"
+      ],
+      "orderStatus": [
+        "data.status",
+        "data.order_status"
+      ],
+      "marketplace": "{{marketplace}}",
+      "invoice": [
+        "data.tracking_number",
+        "data.tracking_no",
+        "data.invoice",
+        "data.ordersn",
+        "data.order_id"
+      ],
+      "orderDetailOk": { "path": "order.ok" },
+      "orderTotalQuantity": { "path": "order.total_quantity" }
+    },
+    "variable_types": {
+      "orderDetailOk": "boolean",
+      "orderTotalQuantity": "long"
+    }
+  },
+
+  "_comment_external_tasks": "EXTERNAL SERVICE TASK — worker yang mengambil task bertipe External dari Camunda lalu menjalankannya di backend ini (fetchAndLock → handler → complete/failure/bpmnError). `topic` = isi field 'Topic' pada Service Task (Implementation: External) di BPMN. `handler` = handler bawaan (order_detail | send_signal | stock_sync_part | stock_sync_global | service_webhook_test) atau kode sendiri (\"paket.modul:fungsi\"). `variables` = variabel yang di-fetch (fetchVariable). `enabled` = auto-start worker saat aplikasi start; endpoint manual /api/v1/webhook/camunda/external-tasks/* tetap bisa dipakai untuk uji coba walau false. Catatan: topic stock-sync-global sengaja disabled (berat — jalankan lewat scheduler/manual).",
+  "external_tasks": {
+    "enabled": true,
+    "worker_id": "sync-service-1",
+    "max_tasks": 10,
+    "poll_interval_seconds": 2,
+    "idle_backoff_seconds": 60,
+    "default_lock_duration_ms": 60000,
+    "default_retries": 3,
+    "retry_timeout_ms": 30000,
+    "async_response_timeout_ms": 0,
+    "use_priority": true,
+    "decrement_retries": true,
+    "report_handler_errors": true,
+    "topics": [
+      {
+        "topic": "webhook-part-batch",
+        "handler": "webhook_part_batch",
+        "variables": ["webhookBatchSize"],
+        "lock_duration_ms": 300000,
+        "_comment": "Claim webhook_log PENDING, deduplikasi part_id, lalu jalankan satu batch."
+      },
+      {
+        "topic": "serviceWebhookTest",
+        "handler": "service_webhook_test",
+        "batch": true,
+        "_comment_batch": "BATCH (BISA DIUBAH TANPA RESTART): true = SEMUA task topik ini yang terkumpul dalam SATU poll di-merge jadi SATU panggilan handler -> satu POST /api/v2/stock-sync/run-part dengan body part_id ARRAY gabungan (dedup) lalu tiap task di-complete dengan hasil yang sama. false (atau hapus kunci ini) = dikerjakan SATU PER SATU per task (satu panggilan /run-part per task). Handler juga harus batch_capable (service_webhook_test memang sudah siap).",
+        "_comment": "deserialize_values=false → variabel bertipe Json (Spin) dikembalikan sebagai TEKS JSON, bukan deskriptor node. Dibutuhkan utk `partId`: tipe Json TIDAK bisa di-round-trip lewat fetchAndLock, sehingga task berikutnya (mis. serviceWebhookCancel setelah signal cancel) kena PART_ID_MISSING walau variabelnya ada. Bila tipe String (bawaan handler), nilainya sama saja.",
+        "deserialize_values": false,
+        "variables": [
+          "partId",
+          "total_reserved",
+          "webhookLogId",
+          "orderStatus",
+          "e2eTest"
+        ],
+        "lock_duration_ms": 300000
+      }
+    ]
+  },
+
+  "variable_types": {
+    "_comment": "Semua dikirim sebagai string supaya seragam antar marketplace (angka Shopee otomatis dikonversi). Variabel order memakai tipe aslinya: Json (array), Long (jumlah), Boolean (status fetch).",
+    "invoice": "string",
+    "courier": "string",
+    "retur_date": "string",
+    "orderId": "string",
+    "orderStatus": "string",
+    "shopId": "string",
+    "updateTime": "string",
+    "orderItems": "json",
+    "orderProducts": "string",
+    "orderItemCount": "long",
+    "orderTotalQuantity": "long",
+    "orderDetailStatus": "string",
+    "orderDetailOk": "boolean",
+    "total_reserved": "long",
+    "reserved_products": "json",
+    "partId": "string",
+    "webhookLogId": "string",
+    "e2eTest": "boolean"
+  }
+}
+

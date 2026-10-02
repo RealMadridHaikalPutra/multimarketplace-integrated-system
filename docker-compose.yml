@@ -1,0 +1,23 @@
+version: "3.9"
+
+services:
+  # -----------------------------------------------------------
+  # Synchronization Service (FastAPI)
+  # -----------------------------------------------------------
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sync-service-app
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      # APISIX — configurable via .env
+      APISIX_BASE_URL: "${APISIX_BASE_URL:-http://apisix:9080}"
+      APISIX_PRODUCTS_PATH: "${APISIX_PRODUCTS_PATH:-/products}"
+    networks:
+      - default
+
+volumes: {}

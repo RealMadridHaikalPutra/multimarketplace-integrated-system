@@ -1,0 +1,26 @@
+# FastAPI & Server
+fastapi>=0.115.0
+uvicorn[standard]>=0.31.0
+
+# Database
+sqlalchemy[asyncio]>=2.0.36
+asyncpg>=0.30.0
+psycopg2-binary>=2.9.10
+
+# Validation
+pydantic>=2.10.0
+pydantic-settings>=2.6.0
+
+# HTTP Client (APISIX gateway + InvenTree)
+httpx>=0.28.0
+
+# Development
+alembic>=1.14.0
+python-dotenv>=1.0.1
+# IANA timezone database — required for zoneinfo (daily stock-sync schedule,
+# Asia/Jakarta) on Windows servers without a system tz database.
+tzdata>=2024.1
+
+# Testing
+pytest>=8.3.0
+pytest-asyncio>=0.24.0
